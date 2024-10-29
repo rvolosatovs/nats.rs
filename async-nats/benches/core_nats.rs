@@ -176,9 +176,78 @@ pub fn request(c: &mut Criterion) {
     subscribe_amount_group.finish();
 }
 
+pub fn send_request(c: &mut Criterion) {
+    let server = nats_server::run_basic_server();
+    let messages_per_iter = 10_000;
+
+    let mut request_amount_group = c.benchmark_group("nats::send_request_amount");
+    request_amount_group.sample_size(10);
+
+    for &size in [32, 1024, 8192].iter() {
+        let url = server.client_url();
+        request_amount_group.throughput(criterion::Throughput::Elements(messages_per_iter));
+        request_amount_group.bench_with_input(
+            criterion::BenchmarkId::from_parameter(size),
+            &size,
+            move |b, _| {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let url = url.clone();
+                let nc = rt.block_on(async move {
+                    let nc = async_nats::ConnectOptions::new()
+                        .connect(url.clone())
+                        .await
+                        .unwrap();
+                    let (started, ready) = tokio::sync::oneshot::channel();
+                    tokio::task::spawn({
+                        async move {
+                            let client = async_nats::ConnectOptions::new()
+                                .connect(url)
+                                .await
+                                .unwrap();
+
+                            let mut subscription = client.subscribe("bench").await.unwrap();
+                            tokio::time::sleep(Duration::from_secs(3)).await;
+                            started.send(()).unwrap();
+
+                            while let Some(request) = subscription.next().await {
+                                client
+                                    .publish(request.reply.unwrap(), "".into())
+                                    .await
+                                    .unwrap();
+                            }
+                        }
+                    });
+                    ready.await.unwrap();
+                    nc
+                });
+                b.to_async(rt).iter_with_large_drop(move || {
+                    let nc = nc.clone();
+                    async move {
+                        send_requests(nc, Bytes::from_static(&MSG[..size]), messages_per_iter).await
+                    }
+                });
+            },
+        );
+    }
+    request_amount_group.finish();
+}
+
 async fn requests(nc: async_nats::Client, msg: Bytes, amount: u64) {
     for _i in 0..amount {
         nc.request("bench", msg.clone()).await.unwrap();
+    }
+}
+
+async fn send_requests(nc: async_nats::Client, msg: Bytes, amount: u64) {
+    for _i in 0..amount {
+        nc.send_request(
+            "bench",
+            async_nats::Request::new()
+                .inbox("test".into())
+                .payload(msg.clone()),
+        )
+        .await
+        .unwrap();
     }
 }
 
@@ -195,4 +264,4 @@ async fn subscribe_messages(nc: async_nats::Client, amount: u64) {
     }
 }
 
-criterion_group!(core_nats, publish, subscribe, request);
+criterion_group!(core_nats, publish, subscribe, request, send_request);
