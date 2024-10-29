@@ -3,6 +3,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use criterion::{criterion_group, Criterion};
 use futures::stream::StreamExt;
+use tokio::task::JoinSet;
 
 static MSG: &[u8] = &[22; 32768];
 
@@ -233,21 +234,35 @@ pub fn send_request(c: &mut Criterion) {
 }
 
 async fn requests(nc: async_nats::Client, msg: Bytes, amount: u64) {
+    let mut tasks = JoinSet::new();
     for _i in 0..amount {
-        nc.request("bench", msg.clone()).await.unwrap();
+        let msg = msg.clone();
+        let nc = nc.clone();
+        tasks.spawn(async move { nc.request("bench", msg).await.unwrap() });
+    }
+    while let Some(res) = tasks.join_next().await {
+        res.expect("failed to join task");
     }
 }
 
 async fn send_requests(nc: async_nats::Client, msg: Bytes, amount: u64) {
+    let mut tasks = JoinSet::new();
     for _i in 0..amount {
-        nc.send_request(
-            "bench",
-            async_nats::Request::new()
-                .inbox("test".into())
-                .payload(msg.clone()),
-        )
-        .await
-        .unwrap();
+        let msg = msg.clone();
+        let nc = nc.clone();
+        tasks.spawn(async move {
+            nc.send_request(
+                "bench",
+                async_nats::Request::new()
+                    .inbox(nc.new_inbox())
+                    .payload(msg.clone()),
+            )
+            .await
+            .unwrap()
+        });
+    }
+    while let Some(res) = tasks.join_next().await {
+        res.expect("failed to join task");
     }
 }
 
